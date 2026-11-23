@@ -32,6 +32,11 @@ HY2_LISTEN_PORT=""
 TUIC_LISTEN_PORT=""
 ANYTLS_LISTEN_PORT=""
 
+ENABLE_HY2=0
+ENABLE_TUIC=0
+ENABLE_ANYTLS=0
+IP_MODE=""
+
 AUTH_PASS=""
 UUID=""
 
@@ -219,6 +224,210 @@ prompt_port() {
   done
 }
 
+apply_protocol_choice() {
+  raw="$(printf '%s' "$1" | tr -d '[:space:]')"
+  [ -n "$raw" ] || return 1
+
+  h=0
+  t=0
+  a=0
+
+  case "$raw" in
+    4|all|ALL)
+      h=1
+      t=1
+      a=1
+      ;;
+    *)
+      old_ifs="$IFS"
+      IFS=','
+      for item in $raw; do
+        case "$item" in
+          1) h=1 ;;
+          2) t=1 ;;
+          3) a=1 ;;
+          4) h=1; t=1; a=1 ;;
+          *)
+            IFS="$old_ifs"
+            return 1
+            ;;
+        esac
+      done
+      IFS="$old_ifs"
+      ;;
+  esac
+
+  if [ "$h" -eq 0 ] && [ "$t" -eq 0 ] && [ "$a" -eq 0 ]; then
+    return 1
+  fi
+
+  ENABLE_HY2="$h"
+  ENABLE_TUIC="$t"
+  ENABLE_ANYTLS="$a"
+  return 0
+}
+
+show_protocol_status() {
+  label=""
+  if [ "$ENABLE_HY2" = "1" ]; then
+    label="Hysteria2"
+  fi
+  if [ "$ENABLE_TUIC" = "1" ]; then
+    if [ -n "$label" ]; then
+      label="$label / TUIC"
+    else
+      label="TUIC"
+    fi
+  fi
+  if [ "$ENABLE_ANYTLS" = "1" ]; then
+    if [ -n "$label" ]; then
+      label="$label / AnyTLS"
+    else
+      label="AnyTLS"
+    fi
+  fi
+  printf '%s' "${label:-无}"
+}
+
+prompt_protocols() {
+  printf '\n%s\n' "===== 第一步：选择要安装的协议（可多选）=====" >&2
+  printf '当前选择：%s\n' "$(show_protocol_status)" >&2
+  printf '%s\n' "1) Hysteria2（UDP）" >&2
+  printf '%s\n' "2) TUIC（UDP）" >&2
+  printf '%s\n' "3) AnyTLS（TCP）" >&2
+  printf '%s\n' "4) 全部安装（Hysteria2 + TUIC + AnyTLS）" >&2
+  printf '%s\n' "多选示例：输入 1,3 表示只安装 Hysteria2 和 AnyTLS" >&2
+  printf '%s\n' "0) 取消" >&2
+
+  while :; do
+    printf '%s' "请选择 [1/2/3/4 或 1,3]: " >&2
+    IFS= read -r ans || ans=""
+    case "$ans" in
+      '')
+        log "[WARN] 请输入选项，不要直接回车"
+        continue
+        ;;
+      0)
+        return 1
+        ;;
+    esac
+
+    if apply_protocol_choice "$ans"; then
+      log "[INFO] 已选择协议：$(show_protocol_status)"
+      return 0
+    fi
+    log "[ERROR] 无效选择，请输入 1-4 或逗号分隔的组合（如 1,3）"
+  done
+}
+
+ip_mode_label() {
+  case "$IP_MODE" in
+    4) printf '%s' "仅 IPv4" ;;
+    6) printf '%s' "仅 IPv6" ;;
+    both) printf '%s' "IPv4 + IPv6（双栈）" ;;
+    *) printf '%s' "未选择" ;;
+  esac
+}
+
+listen_addr() {
+  case "$IP_MODE" in
+    4) printf '%s' "0.0.0.0" ;;
+    *) printf '%s' "::" ;;
+  esac
+}
+
+stack_selected() {
+  case "$IP_MODE" in
+    4) [ "$1" = "V4" ] ;;
+    6) [ "$1" = "V6" ] ;;
+    *) return 0 ;;
+  esac
+}
+
+prompt_ip_mode() {
+  printf '\n%s\n' "===== 第二步：选择监听与节点输出的 IP 栈 =====" >&2
+  printf '当前选择：%s\n' "$(ip_mode_label)" >&2
+  printf '%s\n' "1) 仅 IPv4" >&2
+  printf '%s\n' "2) 仅 IPv6" >&2
+  printf '%s\n' "3) 双栈（IPv4 + IPv6）" >&2
+  printf '%s\n' "0) 取消" >&2
+
+  while :; do
+    printf '%s' "请选择 [1/2/3]: " >&2
+    IFS= read -r ans || ans=""
+    case "$ans" in
+      1) IP_MODE="4" ;;
+      2) IP_MODE="6" ;;
+      3) IP_MODE="both" ;;
+      0) return 1 ;;
+      '')
+        log "[WARN] 请输入选项，不要直接回车"
+        continue
+        ;;
+      *)
+        log "[ERROR] 请输入 1、2 或 3"
+        continue
+        ;;
+    esac
+    log "[INFO] 已选择：$(ip_mode_label)"
+    return 0
+  done
+}
+
+clear_disabled_ports() {
+  if [ "$ENABLE_HY2" != "1" ]; then
+    HY2_LISTEN_PORT=""
+  fi
+  if [ "$ENABLE_TUIC" != "1" ]; then
+    TUIC_LISTEN_PORT=""
+  fi
+  if [ "$ENABLE_ANYTLS" != "1" ]; then
+    ANYTLS_LISTEN_PORT=""
+  fi
+}
+
+prompt_all_ports() {
+  USED_UDP_PORTS=""
+  USED_TCP_PORTS=""
+  clear_disabled_ports()
+
+  if [ "$ENABLE_HY2" = "1" ]; then
+    HY2_LISTEN_PORT="$(prompt_port '请输入 HY2 端口 (UDP) [回车随机]' udp)"
+  fi
+  if [ "$ENABLE_TUIC" = "1" ]; then
+    TUIC_LISTEN_PORT="$(prompt_port '请输入 TUIC 端口 (UDP) [回车随机]' udp)"
+  fi
+  if [ "$ENABLE_ANYTLS" = "1" ]; then
+    ANYTLS_LISTEN_PORT="$(prompt_port '请输入 ANYTLS 端口 (TCP) [回车随机]' tcp)"
+  fi
+}
+
+prompt_missing_ports() {
+  USED_UDP_PORTS=""
+  USED_TCP_PORTS=""
+  clear_disabled_ports()
+
+  if [ "$ENABLE_HY2" = "1" ] && [ -n "$HY2_LISTEN_PORT" ]; then
+    proto_port_mark udp "$HY2_LISTEN_PORT"
+  fi
+  if [ "$ENABLE_TUIC" = "1" ] && [ -n "$TUIC_LISTEN_PORT" ]; then
+    proto_port_mark udp "$TUIC_LISTEN_PORT"
+  fi
+  if [ "$ENABLE_ANYTLS" = "1" ] && [ -n "$ANYTLS_LISTEN_PORT" ]; then
+    proto_port_mark tcp "$ANYTLS_LISTEN_PORT"
+  fi
+
+  if [ "$ENABLE_HY2" = "1" ] && [ -z "$HY2_LISTEN_PORT" ]; then
+    HY2_LISTEN_PORT="$(prompt_port '请输入 HY2 端口 (UDP) [回车随机]' udp)"
+  fi
+  if [ "$ENABLE_TUIC" = "1" ] && [ -z "$TUIC_LISTEN_PORT" ]; then
+    TUIC_LISTEN_PORT="$(prompt_port '请输入 TUIC 端口 (UDP) [回车随机]' udp)"
+  fi
+  if [ "$ENABLE_ANYTLS" = "1" ] && [ -z "$ANYTLS_LISTEN_PORT" ]; then
+    ANYTLS_LISTEN_PORT="$(prompt_port '请输入 ANYTLS 端口 (TCP) [回车随机]' tcp)"
+  fi
+}
+
 gen_creds() {
   AUTH_PASS="$(openssl rand -hex 4)"
   UUID="$(cat /proc/sys/kernel/random/uuid)"
@@ -244,6 +453,10 @@ save_state() {
 SNI_HOST=$(shq "$SNI_HOST")
 HY2_UP_MBPS=$(shq "$HY2_UP_MBPS")
 HY2_DOWN_MBPS=$(shq "$HY2_DOWN_MBPS")
+IP_MODE=$(shq "$IP_MODE")
+ENABLE_HY2=$(shq "$ENABLE_HY2")
+ENABLE_TUIC=$(shq "$ENABLE_TUIC")
+ENABLE_ANYTLS=$(shq "$ENABLE_ANYTLS")
 HY2_LISTEN_PORT=$(shq "$HY2_LISTEN_PORT")
 TUIC_LISTEN_PORT=$(shq "$TUIC_LISTEN_PORT")
 ANYTLS_LISTEN_PORT=$(shq "$ANYTLS_LISTEN_PORT")
@@ -256,6 +469,10 @@ EOF
 load_state() {
   [ -f "$STATE_FILE" ] || return 1
   . "$STATE_FILE"
+  ENABLE_HY2="${ENABLE_HY2:-1}"
+  ENABLE_TUIC="${ENABLE_TUIC:-1}"
+  ENABLE_ANYTLS="${ENABLE_ANYTLS:-1}"
+  IP_MODE="${IP_MODE:-both}"
 }
 
 install_singbox() {
@@ -312,18 +529,18 @@ check_singbox_exec() {
 
 write_config() {
   mkdir -p "$BASE_DIR"
-  cat > "$CONFIG_FILE" <<EOF
-{
-  "log": {
-    "level": "warn",
-    "timestamp": true,
-    "output": "$LOG_FILE",
-  },
-  "inbounds": [
+
+  ib_file="$BASE_DIR/inbounds.json.tmp"
+  ib_fixed="$BASE_DIR/inbounds.fixed.tmp"
+  : > "$ib_file"
+  listen="$(listen_addr)"
+
+  if [ "$ENABLE_HY2" = "1" ]; then
+    cat >> "$ib_file" <<EOF
     {
       "type": "hysteria2",
       "tag": "hy2",
-      "listen": "::",
+      "listen": "$listen",
       "listen_port": $HY2_LISTEN_PORT,
       "up_mbps": $HY2_UP_MBPS,
       "down_mbps": $HY2_DOWN_MBPS,
@@ -339,10 +556,15 @@ write_config() {
         "alpn": ["h3"]
       }
     },
+EOF
+  fi
+
+  if [ "$ENABLE_TUIC" = "1" ]; then
+    cat >> "$ib_file" <<EOF
     {
       "type": "tuic",
       "tag": "tuic",
-      "listen": "::",
+      "listen": "$listen",
       "listen_port": $TUIC_LISTEN_PORT,
       "users": [
         {
@@ -358,10 +580,15 @@ write_config() {
         "alpn": ["h3"]
       }
     },
+EOF
+  fi
+
+  if [ "$ENABLE_ANYTLS" = "1" ]; then
+    cat >> "$ib_file" <<EOF
     {
       "type": "anytls",
       "tag": "anytls",
-      "listen": "::",
+      "listen": "$listen",
       "listen_port": $ANYTLS_LISTEN_PORT,
       "users": [
         {
@@ -373,24 +600,31 @@ write_config() {
         "certificate_path": "$CERT_FILE",
         "key_path": "$KEY_FILE"
       }
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
     },
-    {
-      "type": "block",
-      "tag": "block"
-    }
-  ],
-  "route": {
-    "final": "direct"
-  }
-}
 EOF
+  fi
 
+  sed '$ s/,$//' "$ib_file" > "$ib_fixed"
+
+  {
+    printf '{\n'
+    printf '  "log": {\n'
+    printf '    "level": "warn",\n'
+    printf '    "timestamp": true,\n'
+    printf '    "output": "%s"\n' "$LOG_FILE"
+    printf '  },\n'
+    printf '  "inbounds": [\n'
+    cat "$ib_fixed"
+    printf '\n  ],\n'
+    printf '  "outbounds": [\n'
+    printf '    {\n      "type": "direct",\n      "tag": "direct"\n    },\n'
+    printf '    {\n      "type": "block",\n      "tag": "block"\n    }\n'
+    printf '  ],\n'
+    printf '  "route": {\n    "final": "direct"\n  }\n'
+    printf '}\n'
+  } > "$CONFIG_FILE"
+
+  rm -f "$ib_file" "$ib_fixed"
   chmod 600 "$CONFIG_FILE"
 }
 
@@ -438,17 +672,29 @@ ensure_firewall() {
   # 仅尝试放行本机防火墙；云厂商安全组仍需手动放行
   if have_cmd ufw; then
     if ufw status 2>/dev/null | grep -q 'Status: active'; then
-      ufw allow "${HY2_LISTEN_PORT}/udp" >/dev/null 2>&1 || true
-      ufw allow "${TUIC_LISTEN_PORT}/udp" >/dev/null 2>&1 || true
-      ufw allow "${ANYTLS_LISTEN_PORT}/tcp" >/dev/null 2>&1 || true
+      if [ "$ENABLE_HY2" = "1" ]; then
+        ufw allow "${HY2_LISTEN_PORT}/udp" >/dev/null 2>&1 || true
+      fi
+      if [ "$ENABLE_TUIC" = "1" ]; then
+        ufw allow "${TUIC_LISTEN_PORT}/udp" >/dev/null 2>&1 || true
+      fi
+      if [ "$ENABLE_ANYTLS" = "1" ]; then
+        ufw allow "${ANYTLS_LISTEN_PORT}/tcp" >/dev/null 2>&1 || true
+      fi
     fi
   fi
 
   if have_cmd firewall-cmd; then
     if firewall-cmd --state >/dev/null 2>&1; then
-      firewall-cmd --permanent --add-port="${HY2_LISTEN_PORT}/udp" >/dev/null 2>&1 || true
-      firewall-cmd --permanent --add-port="${TUIC_LISTEN_PORT}/udp" >/dev/null 2>&1 || true
-      firewall-cmd --permanent --add-port="${ANYTLS_LISTEN_PORT}/tcp" >/dev/null 2>&1 || true
+      if [ "$ENABLE_HY2" = "1" ]; then
+        firewall-cmd --permanent --add-port="${HY2_LISTEN_PORT}/udp" >/dev/null 2>&1 || true
+      fi
+      if [ "$ENABLE_TUIC" = "1" ]; then
+        firewall-cmd --permanent --add-port="${TUIC_LISTEN_PORT}/udp" >/dev/null 2>&1 || true
+      fi
+      if [ "$ENABLE_ANYTLS" = "1" ]; then
+        firewall-cmd --permanent --add-port="${ANYTLS_LISTEN_PORT}/tcp" >/dev/null 2>&1 || true
+      fi
       firewall-cmd --reload >/dev/null 2>&1 || true
     fi
   fi
@@ -554,28 +800,49 @@ show_node_set() {
   host="$1"
   label="$2"
   printf '\n[%s]\n' "$label"
-  emit_hy2 "$host" "$label"
-  emit_tuic "$host" "$label"
-  emit_anytls "$host" "$label"
+  if [ "$ENABLE_HY2" = "1" ]; then
+    emit_hy2 "$host" "$label"
+  fi
+  if [ "$ENABLE_TUIC" = "1" ]; then
+    emit_tuic "$host" "$label"
+  fi
+  if [ "$ENABLE_ANYTLS" = "1" ]; then
+    emit_anytls "$host" "$label"
+  fi
 }
 
 show_nodes() {
   load_state || true
   detect_public_ips
   printf '\n%s\n' "===== 节点信息 ====="
-  if [ -n "$PUBLIC_IPV4" ]; then
+  printf '协议：%s\n' "$(show_protocol_status)"
+  printf '网络：%s\n' "$(ip_mode_label)"
+  if [ -n "$PUBLIC_IPV4" ] && stack_selected "V4"; then
     show_node_set "$PUBLIC_IPV4" "V4"
   fi
-  if [ -n "$PUBLIC_IPV6" ]; then
+  if [ -n "$PUBLIC_IPV6" ] && stack_selected "V6"; then
     show_node_set "$PUBLIC_IPV6" "V6"
   fi
-  if [ -z "$PUBLIC_IPV4" ] && [ -z "$PUBLIC_IPV6" ]; then
+  if [ "$IP_MODE" = "4" ] && [ -z "$PUBLIC_IPV4" ]; then
+    log "[WARN] 未检测到公网 IPv4"
+  elif [ "$IP_MODE" = "6" ] && [ -z "$PUBLIC_IPV6" ]; then
+    log "[WARN] 未检测到公网 IPv6"
+  elif [ "$IP_MODE" = "both" ] && [ -z "$PUBLIC_IPV4" ] && [ -z "$PUBLIC_IPV6" ]; then
     log "[WARN] 未检测到公网 IPv4/IPv6"
   fi
   printf '\n'
 }
 
 fresh_install() {
+  prompt_protocols || {
+    log "[INFO] 已取消安装"
+    exit 0
+  }
+  prompt_ip_mode || {
+    log "[INFO] 已取消安装"
+    exit 0
+  }
+
   pkg_install
   install_singbox
   check_singbox_exec
@@ -585,9 +852,8 @@ fresh_install() {
   log "[INFO] 检测到公网 IPv4: ${PUBLIC_IPV4:-未检测到}"
   log "[INFO] 检测到公网 IPv6: ${PUBLIC_IPV6:-未检测到}"
 
-  HY2_LISTEN_PORT="$(prompt_port '请输入 HY2 端口 (UDP) [回车随机]' udp)"
-  TUIC_LISTEN_PORT="$(prompt_port '请输入 TUIC 端口 (UDP) [回车随机]' udp)"
-  ANYTLS_LISTEN_PORT="$(prompt_port '请输入 ANYTLS 端口 (TCP) [回车随机]' tcp)"
+  printf '\n%s\n' "===== 第三步：配置各协议端口 =====" >&2
+  prompt_all_ports
 
   gen_creds
   gen_cert
@@ -609,12 +875,8 @@ reset_ports() {
   load_state
 
   stop_service
-  USED_UDP_PORTS=""
-  USED_TCP_PORTS=""
-
-  HY2_LISTEN_PORT="$(prompt_port '请输入 HY2 端口 (UDP) [回车随机]' udp)"
-  TUIC_LISTEN_PORT="$(prompt_port '请输入 TUIC 端口 (UDP) [回车随机]' udp)"
-  ANYTLS_LISTEN_PORT="$(prompt_port '请输入 ANYTLS 端口 (TCP) [回车随机]' tcp)"
+  printf '\n%s\n' "===== 重置已启用协议的端口 =====" >&2
+  prompt_all_ports
 
   save_state
   write_config
@@ -625,6 +887,34 @@ reset_ports() {
 
   log "[INFO] 重启服务..."
   start_service
+
+  show_nodes
+}
+
+change_settings() {
+  load_state || true
+
+  prompt_protocols || {
+    log "[INFO] 已取消"
+    return 0
+  }
+  prompt_ip_mode || {
+    log "[INFO] 已取消"
+    return 0
+  }
+
+  printf '\n%s\n' "===== 配置新启用协议的端口 =====" >&2
+  prompt_missing_ports
+
+  save_state
+  write_config
+  ensure_firewall
+
+  log "[INFO] 检查 sing-box 配置..."
+  "$SB_BIN" check -c "$CONFIG_FILE"
+
+  log "[INFO] 重启服务..."
+  restart_service
 
   show_nodes
 }
@@ -652,13 +942,16 @@ menu_loop() {
 
   while :; do
     printf '\n%s\n' "===== sing-box 3in1（hy2/tuic/Anytls）管理脚本 ====="
-    printf '%s\n' "1) 重装"
+    printf '当前协议：%s\n' "$(show_protocol_status)"
+    printf '当前网络：%s\n' "$(ip_mode_label)"
+    printf '%s\n' "1) 重装（重新选择协议与 IP 栈）"
     printf '%s\n' "2) 卸载"
     printf '%s\n' "3) 重置端口"
     printf '%s\n' "4) 重启服务"
     printf '%s\n' "5) 查看节点"
+    printf '%s\n' "6) 修改协议 / IP 栈"
     printf '%s\n' "0) 退出"
-    printf '%s' "请选择 [0-5]: " >&2
+    printf '%s' "请选择 [0-6]: " >&2
 
     IFS= read -r choice || choice=""
 
@@ -685,11 +978,14 @@ menu_loop() {
       5)
         show_nodes
         ;;
+      6)
+        change_settings
+        ;;
       0|'')
         exit 0
         ;;
       *)
-        log "请输入 0-5 之间的选项"
+        log "请输入 0-6 之间的选项"
         ;;
     esac
   done

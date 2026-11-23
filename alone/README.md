@@ -71,7 +71,7 @@
 **Hysteria2管理脚本**
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/hakd-code/sbox-easy/main/alone/hy2.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/WuCaiCaiCai/sbox-easy-single/main/alone/hy2.sh)
 ```
 
 
@@ -79,7 +79,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/hakd-code/sbox-easy/main/alo
 **TUIC管理脚本**
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/hakd-code/sbox-easy/main/alone/tuic.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/WuCaiCaiCai/sbox-easy-single/main/alone/tuic.sh)
 ```
 
 
@@ -87,7 +87,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/hakd-code/sbox-easy/main/alo
 **AnyTLS管理脚本**
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/hakd-code/sbox-easy/main/alone/anytls.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/WuCaiCaiCai/sbox-easy-single/main/alone/anytls.sh)
 ```
 
 
