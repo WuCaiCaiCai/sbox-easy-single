@@ -632,11 +632,7 @@ systemctl daemon-reload 2>/dev/null || true
 ├── LANDING.md
 ├── sbox.sh
 ├── landing.sh
-├── alone/
-│   ├── README.md
-│   ├── hy2.sh
-│   ├── tuic.sh
-│   └── anytls.sh
+├── .gitattributes
 └── LICENSE
 ```
 
