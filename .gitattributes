@@ -1,0 +1,6 @@
+# 统一使用 LF 换行，避免 Windows 编辑器把脚本改成 CRLF
+* text=auto
+
+*.sh text eol=lf
+*.md text eol=lf
+LICENSE text eol=lf
