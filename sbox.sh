@@ -73,6 +73,7 @@ RELAY_HOST=""
 RELAY_PORT=""
 RELAY_USER=""
 RELAY_PASS=""
+RELAY_METHOD=""
 RELAY_HY2_PORT=""
 RELAY_TUIC_PORT=""
 RELAY_ANYTLS_PORT=""
@@ -103,7 +104,7 @@ line_set() {
 }
 
 line_clear() {
-  for line_field in NAME TYPE HOST PORT USER PASS HY2_PORT TUIC_PORT ANYTLS_PORT MIERU_PORT; do
+  for line_field in NAME TYPE HOST PORT USER PASS METHOD HY2_PORT TUIC_PORT ANYTLS_PORT MIERU_PORT; do
     eval "LINE${1}_${line_field}=''"
   done
 }
@@ -113,7 +114,7 @@ line_compact() {
   line_i="$line_idx"
   while [ "$line_i" -lt "$LINE_COUNT" ]; do
     line_next=$((line_i + 1))
-    for line_field in NAME TYPE HOST PORT USER PASS HY2_PORT TUIC_PORT ANYTLS_PORT MIERU_PORT; do
+    for line_field in NAME TYPE HOST PORT USER PASS METHOD HY2_PORT TUIC_PORT ANYTLS_PORT MIERU_PORT; do
       line_set "$line_i" "$line_field" "$(line_get "$line_next" "$line_field")"
     done
     line_i=$((line_i + 1))
@@ -153,6 +154,7 @@ line_reset_scratch() {
   RELAY_PORT=""
   RELAY_USER=""
   RELAY_PASS=""
+  RELAY_METHOD=""
   RELAY_HY2_PORT=""
   RELAY_TUIC_PORT=""
   RELAY_ANYTLS_PORT=""
@@ -167,6 +169,7 @@ line_load_scratch() {
   RELAY_PORT="$(line_get "$line_i" PORT)"
   RELAY_USER="$(line_get "$line_i" USER)"
   RELAY_PASS="$(line_get "$line_i" PASS)"
+  RELAY_METHOD="$(line_get "$line_i" METHOD)"
   RELAY_HY2_PORT="$(line_get "$line_i" HY2_PORT)"
   RELAY_TUIC_PORT="$(line_get "$line_i" TUIC_PORT)"
   RELAY_ANYTLS_PORT="$(line_get "$line_i" ANYTLS_PORT)"
@@ -182,6 +185,7 @@ line_store_scratch() {
   line_set "$line_i" PORT "$RELAY_PORT"
   line_set "$line_i" USER "$RELAY_USER"
   line_set "$line_i" PASS "$RELAY_PASS"
+  line_set "$line_i" METHOD "$RELAY_METHOD"
   line_set "$line_i" HY2_PORT "$RELAY_HY2_PORT"
   line_set "$line_i" TUIC_PORT "$RELAY_TUIC_PORT"
   line_set "$line_i" ANYTLS_PORT "$RELAY_ANYTLS_PORT"
@@ -752,10 +756,32 @@ json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+b64_encode() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
+
+ss_key_bytes() {
+  case "$1" in
+    *aes-128*) printf '16' ;;
+    *)         printf '32' ;;
+  esac
+}
+
+ss_key_ok() {
+  case "$1" in
+    2022-*) ;;
+    *) return 0 ;;
+  esac
+  [ -n "${2:-}" ] || return 1
+  ss_len="$(printf '%s' "$2" | base64 -d 2>/dev/null | wc -c | tr -d ' ')"
+  [ "$ss_len" = "$(ss_key_bytes "$1")" ]
+}
+
 relay_label() {
   case "$RELAY_TYPE" in
     socks) printf '%s：SOCKS5 %s:%s' "${RELAY_NAME:-中转}" "$RELAY_HOST" "$RELAY_PORT" ;;
     http)  printf '%s：HTTP %s:%s' "${RELAY_NAME:-中转}" "$RELAY_HOST" "$RELAY_PORT" ;;
+    ss)    printf '%s：SS2022 %s:%s（%s）' "${RELAY_NAME:-中转}" "$RELAY_HOST" "$RELAY_PORT" "$RELAY_METHOD" ;;
     *)     printf '未添加' ;;
   esac
 }
@@ -771,11 +797,106 @@ relay_link() {
   case "$RELAY_TYPE" in
     socks) printf 'socks5://%s%s' "$relay_auth" "$relay_hp" ;;
     http)  printf 'http://%s%s' "$relay_auth" "$relay_hp" ;;
+    ss)    printf 'ss://%s@%s#%s' "$(b64_encode "$RELAY_METHOD:$RELAY_PASS")" "$relay_hp" "${RELAY_NAME:-SS}" ;;
   esac
+}
+
+parse_ss_uri() {
+  ss_uri="$1"
+  ss_uri="${ss_uri#ss://}"
+
+  case "$ss_uri" in
+    *'#'*) ss_uri="${ss_uri%%#*}" ;;
+  esac
+  case "$ss_uri" in
+    *'?'*) ss_uri="${ss_uri%%\?*}" ;;
+  esac
+
+  if [ "${ss_uri#*@}" = "$ss_uri" ]; then
+    ss_decoded="$(printf '%s' "$ss_uri" | base64 -d 2>/dev/null || true)"
+    case "$ss_decoded" in
+      *@*) ss_uri="$ss_decoded" ;;
+      *)
+        log "[ERROR] 无法解析 SS 链接（缺少 @host:port）"
+        return 1
+        ;;
+    esac
+  fi
+
+  ss_userinfo="${ss_uri%@*}"
+  ss_hostport="${ss_uri##*@}"
+
+  case "$ss_userinfo" in
+    *:*)
+      ss_method="${ss_userinfo%%:*}"
+      ss_pass="${ss_userinfo#*:}"
+      ;;
+    *)
+      ss_decoded="$(printf '%s' "$ss_userinfo" | base64 -d 2>/dev/null || true)"
+      case "$ss_decoded" in
+        *:*)
+          ss_method="${ss_decoded%%:*}"
+          ss_pass="${ss_decoded#*:}"
+          ;;
+        *)
+          log "[ERROR] SS 链接缺少 method:password"
+          return 1
+          ;;
+      esac
+      ;;
+  esac
+
+  [ -n "$ss_method" ] || {
+    log "[ERROR] SS 加密方式为空"
+    return 1
+  }
+  [ -n "$ss_pass" ] || {
+    log "[ERROR] SS 密码为空"
+    return 1
+  }
+
+  if ! ss_key_ok "$ss_method" "$ss_pass"; then
+    log "[WARN] SS2022 密钥长度异常（应为 16 或 32 字节的 base64），请确认链接是否完整"
+  fi
+
+  RELAY_TYPE="ss"
+  RELAY_METHOD="$ss_method"
+  RELAY_PASS="$ss_pass"
+  RELAY_USER=""
+
+  case "$ss_hostport" in
+    \[*\]:*)
+      ss_tmp="${ss_hostport#\[}"
+      RELAY_HOST="${ss_tmp%%\]*}"
+      RELAY_PORT="${ss_tmp##*\]:}"
+      ;;
+    \[*\])
+      RELAY_HOST="${ss_hostport#\[}"
+      RELAY_HOST="${RELAY_HOST%\]}"
+      RELAY_PORT=""
+      ;;
+    *:*)
+      RELAY_HOST="${ss_hostport%:*}"
+      RELAY_PORT="${ss_hostport##*:}"
+      ;;
+    *)
+      RELAY_HOST="$ss_hostport"
+      RELAY_PORT=""
+      ;;
+  esac
+  return 0
 }
 
 parse_relay_target() {
   relay_raw="$1"
+
+  case "$relay_raw" in
+    ss://*)
+      parse_ss_uri "$relay_raw"
+      return $?
+      ;;
+  esac
+
   case "$relay_raw" in
     *://*)
       relay_scheme="${relay_raw%%://*}"
@@ -794,13 +915,13 @@ parse_relay_target() {
     socks|socks5|socks5h) RELAY_TYPE="socks" ;;
     http) RELAY_TYPE="http" ;;
     https)
-      log "[ERROR] 暂不支持 https 代理，请填写 socks5:// 或 http:// 链接"
+      log "[ERROR] 暂不支持 https 代理，请填写 socks5:// / http:// / ss://"
       return 1
       ;;
     '')
       : ;;
     *)
-      log "[ERROR] 不支持的代理类型: $relay_scheme"
+      log "[ERROR] 不支持的代理类型: $relay_scheme（支持 socks5:// / http:// / ss://）"
       return 1
       ;;
   esac
@@ -852,7 +973,10 @@ prompt_relay_target() {
   if [ -n "$RELAY_HOST" ] && [ -n "$RELAY_PORT" ]; then
     printf '落地地址 [%s:%s]（回车保持当前）: ' "$RELAY_HOST" "$RELAY_PORT" >&2
   else
-    printf '落地地址（host:port，或粘贴 socks5://user:pass@host:port）: ' >&2
+    case "$RELAY_TYPE" in
+      ss) printf '落地地址（粘贴 ss:// 链接，或 host:port）: ' >&2 ;;
+      *)  printf '落地地址（host:port，或粘贴 socks5://user:pass@host:port）: ' >&2 ;;
+    esac
   fi
   read_or_exit ans
 
@@ -893,6 +1017,26 @@ prompt_relay_target() {
     fi
     break
   done
+
+  if [ "$RELAY_TYPE" = "ss" ]; then
+    if [ -z "$RELAY_METHOD" ]; then
+      printf 'SS 加密方式 [2022-blake3-aes-128-gcm]: ' >&2
+      read_or_exit RELAY_METHOD
+      [ -n "$RELAY_METHOD" ] || RELAY_METHOD="2022-blake3-aes-128-gcm"
+    fi
+    while :; do
+      if [ -z "$RELAY_PASS" ]; then
+        printf 'SS 密码（landing.sh 输出里的那串 base64）: ' >&2
+        read_or_exit RELAY_PASS
+      fi
+      if ss_key_ok "$RELAY_METHOD" "$RELAY_PASS"; then
+        break
+      fi
+      log "[ERROR] $RELAY_METHOD 的密码必须是 $(ss_key_bytes "$RELAY_METHOD") 字节的 base64，请重新输入"
+      RELAY_PASS=""
+    done
+    return 0
+  fi
 
   if [ "$relay_had_auth" = "0" ]; then
     printf '落地用户名（留空表示无认证）: ' >&2
@@ -975,37 +1119,43 @@ prompt_line_ports() {
 prompt_relay() {
   line_idx="$1"
   printf '\n%s\n' "===== 中转线路配置 =====" >&2
-  printf '提示：落地机可运行同仓库的 landing.sh 一键生成 SOCKS5/HTTP 代理。\n' >&2
+  printf '提示：落地机可运行同仓库的 landing.sh，一键生成 SOCKS5 / HTTP / SS2022。\n' >&2
   if [ "$RELAY_TYPE" != "none" ]; then
     printf '当前：%s\n' "$(relay_label)" >&2
   fi
 
   prompt_line_name "$line_idx"
 
-  printf '%s\n' "1) SOCKS5 落地" "2) HTTP 落地" "0) 取消" >&2
+  printf '%s\n' \
+    "1) SOCKS5 落地（明文）" \
+    "2) HTTP 落地（明文，仅 TCP）" \
+    "3) SS2022 落地（加密，推荐）" \
+    "0) 取消" >&2
   while :; do
-    if [ "$RELAY_TYPE" = "http" ]; then
-      relay_def=2
-    else
-      relay_def=1
-    fi
-    printf '请选择落地类型 [1/2，回车=%s]: ' "$relay_def" >&2
+    case "$RELAY_TYPE" in
+      http) relay_def=2 ;;
+      ss)   relay_def=3 ;;
+      *)    relay_def=1 ;;
+    esac
+    printf '请选择落地类型 [1/2/3，回车=%s]: ' "$relay_def" >&2
     read_or_exit ans
     [ -z "$ans" ] && ans="$relay_def"
     case "$ans" in
-      1|2) break ;;
+      1|2|3) break ;;
       0) return 1 ;;
-      *) log "[ERROR] 请输入 1、2 或 0" ;;
+      *) log "[ERROR] 请输入 1、2、3 或 0" ;;
     esac
   done
 
   relay_new_type="socks"
   [ "$ans" = "2" ] && relay_new_type="http"
+  [ "$ans" = "3" ] && relay_new_type="ss"
   if [ "$RELAY_TYPE" != "$relay_new_type" ]; then
     RELAY_HOST=""
     RELAY_PORT=""
     RELAY_USER=""
     RELAY_PASS=""
+    RELAY_METHOD=""
   fi
   RELAY_TYPE="$relay_new_type"
 
@@ -1017,8 +1167,71 @@ prompt_relay() {
   return 0
 }
 
+relay_probe_ss() {
+  if [ ! -x "$SB_BIN" ]; then
+    log "[WARN] 找不到 sing-box，跳过 SS2022 链路测试"
+    return 0
+  fi
+
+  probe_dir="$(mktemp -d)"
+  probe_port="$(rand_port tcp)"
+
+  cat > "$probe_dir/config.json" <<EOF
+{
+  "log": { "level": "error" },
+  "inbounds": [
+    { "type": "socks", "tag": "in", "listen": "127.0.0.1", "listen_port": $probe_port }
+  ],
+  "outbounds": [
+    {
+      "type": "shadowsocks",
+      "tag": "out",
+      "server": "$(json_escape "$RELAY_HOST")",
+      "server_port": $RELAY_PORT,
+      "method": "$(json_escape "$RELAY_METHOD")",
+      "password": "$(json_escape "$RELAY_PASS")"
+    }
+  ],
+  "route": { "final": "out" }
+}
+EOF
+
+  if ! "$SB_BIN" check -c "$probe_dir/config.json" >/dev/null 2>&1; then
+    log "[WARN] SS2022 测试配置无效，跳过测试"
+    rm -rf "$probe_dir"
+    return 0
+  fi
+
+  log "[INFO] 测试 SS2022 落地连通性..."
+  "$SB_BIN" run -c "$probe_dir/config.json" >/dev/null 2>&1 &
+  probe_pid=$!
+  sleep 1
+
+  probe_ok=1
+  if curl -fsS --max-time 10 --socks5-hostname "127.0.0.1:$probe_port" https://ip.sb >/dev/null 2>&1; then
+    probe_ok=0
+  fi
+
+  kill "$probe_pid" >/dev/null 2>&1 || true
+  wait "$probe_pid" >/dev/null 2>&1 || true
+  rm -rf "$probe_dir"
+
+  if [ "$probe_ok" = "0" ]; then
+    log "[INFO] 落地代理可用"
+    return 0
+  fi
+
+  log "[WARN] 无法通过 SS2022 落地访问外网，请检查 method / 密码 / 端口 / 落地白名单"
+  return 1
+}
+
 relay_probe() {
   [ "$RELAY_TYPE" = "none" ] && return 0
+  if [ "$RELAY_TYPE" = "ss" ]; then
+    relay_probe_ss
+    return $?
+  fi
+
   relay_hp="$(fmt_hostport "$RELAY_HOST" "$RELAY_PORT")"
   case "$RELAY_TYPE" in
     socks) relay_proxy="socks5h://$relay_hp" ;;
@@ -1323,6 +1536,7 @@ EOF
       printf 'LINE%d_PORT=%s\n' "$line_i" "$(shq "$(line_get "$line_i" PORT)")"
       printf 'LINE%d_USER=%s\n' "$line_i" "$(shq "$(line_get "$line_i" USER)")"
       printf 'LINE%d_PASS=%s\n' "$line_i" "$(shq "$(line_get "$line_i" PASS)")"
+      printf 'LINE%d_METHOD=%s\n' "$line_i" "$(shq "$(line_get "$line_i" METHOD)")"
       printf 'LINE%d_HY2_PORT=%s\n' "$line_i" "$(shq "$(line_get "$line_i" HY2_PORT)")"
       printf 'LINE%d_TUIC_PORT=%s\n' "$line_i" "$(shq "$(line_get "$line_i" TUIC_PORT)")"
       printf 'LINE%d_ANYTLS_PORT=%s\n' "$line_i" "$(shq "$(line_get "$line_i" ANYTLS_PORT)")"
@@ -1570,7 +1784,20 @@ append_relay_outbound() {
   o_port="$3"
   o_user="$4"
   o_pass="$5"
-  o_tag="$6"
+  o_method="$6"
+  o_tag="$7"
+
+  if [ "$o_type" = "ss" ]; then
+    printf '    {\n'
+    printf '      "type": "shadowsocks",\n'
+    printf '      "tag": "%s",\n' "$o_tag"
+    printf '      "server": "%s",\n' "$(json_escape "$o_host")"
+    printf '      "server_port": %s,\n' "$o_port"
+    printf '      "method": "%s",\n' "$(json_escape "$o_method")"
+    printf '      "password": "%s"\n' "$(json_escape "$o_pass")"
+    printf '    },\n'
+    return 0
+  fi
 
   printf '    {\n'
   if [ "$o_type" = "socks" ]; then
@@ -1655,6 +1882,7 @@ write_config() {
         "$(line_get "$line_i" PORT)" \
         "$(line_get "$line_i" USER)" \
         "$(line_get "$line_i" PASS)" \
+        "$(line_get "$line_i" METHOD)" \
         "relay${line_i}"
       line_i=$((line_i + 1))
     done
@@ -2250,6 +2478,7 @@ line_menu() {
         case "$line_t" in
           socks) line_t="SOCKS5" ;;
           http)  line_t="HTTP" ;;
+          ss)    line_t="SS2022" ;;
         esac
         printf '  %s) %-10s %s %s:%s\n' "$line_i" "$(line_name "$line_i")" "$line_t" "$(line_get "$line_i" HOST)" "$(line_get "$line_i" PORT)"
         line_i=$((line_i + 1))

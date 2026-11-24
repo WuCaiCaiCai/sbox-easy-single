@@ -4,8 +4,9 @@ set -eu
 umask 077
 
 # ============================================================
-# 落地机代理脚本：SOCKS5 / HTTP（给 sbox.sh 的中转节点当落地）
-# 只依赖 sing-box 的 mixed 入站，一个端口同时支持 SOCKS5 和 HTTP
+# 落地机代理脚本：SOCKS5 / HTTP / SS2022（给 sbox.sh 的中转节点当落地）
+# mixed 入站：一个端口同时支持 SOCKS5 和 HTTP（明文）
+# SS2022 入站：加密传输，推荐跨公网使用
 # ============================================================
 
 BASE_DIR="/etc/landing-proxy"
@@ -25,6 +26,12 @@ PROXY_PASS=""
 EXTERNAL_HOST=""
 EXTERNAL_PORT=""
 ALLOW_IP=""
+
+SS_ENABLE=0
+SS_PORT=""
+SS_METHOD=""
+SS_PASS=""
+SS_EXTERNAL_PORT=""
 
 PUBLIC_IPV4=""
 PUBLIC_IPV6=""
@@ -239,6 +246,30 @@ valid_host() {
   esac
 }
 
+ss_key_bytes() {
+  case "$1" in
+    *aes-128*) printf '16' ;;
+    *)         printf '32' ;;
+  esac
+}
+
+ss_gen_key() {
+  case "$1" in
+    *aes-128*) openssl rand -base64 16 ;;
+    *)         openssl rand -base64 32 ;;
+  esac
+}
+
+valid_ss_key() {
+  [ -n "${2:-}" ] || return 1
+  key_len="$(printf '%s' "$2" | base64 -d 2>/dev/null | wc -c | tr -d ' ')"
+  [ "$key_len" = "$(ss_key_bytes "$1")" ]
+}
+
+ss_b64() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
+
 prompt_port() {
   while :; do
     default="$(rand_port)"
@@ -254,6 +285,10 @@ prompt_port() {
     esac
     if [ "$ans" -lt 1 ] || [ "$ans" -gt 65535 ]; then
       log "端口范围必须是 1-65535"
+      continue
+    fi
+    if [ "$SS_ENABLE" = "1" ] && [ -n "$SS_PORT" ] && [ "$ans" = "$SS_PORT" ]; then
+      log "端口 $ans 已被 SS2022 使用，请重新输入"
       continue
     fi
     if port_in_use "$ans"; then
@@ -299,6 +334,112 @@ prompt_auth() {
   done
 }
 
+prompt_ss() {
+  ss_allow="${1:-}"
+  def="n"
+  [ "$SS_ENABLE" = "1" ] && def="y"
+  printf '是否同时开启 SS2022 落地（加密传输，推荐）？[Y/n，当前=%s]: ' "$def" >&2
+  IFS= read -r ans || ans=""
+  case "$ans" in
+    y|Y|yes|YES) SS_ENABLE=1 ;;
+    n|N|no|NO)   SS_ENABLE=0; SS_PORT=""; return 0 ;;
+    '')
+      if [ "$def" = "y" ]; then
+        SS_ENABLE=1
+      else
+        SS_ENABLE=0
+        SS_PORT=""
+        return 0
+      fi
+      ;;
+    *) SS_ENABLE=1 ;;
+  esac
+
+  while :; do
+    pdef="$SS_PORT"
+    if [ -z "$pdef" ]; then
+      pdef="$(rand_port)"
+      [ "$pdef" = "$LISTEN_PORT" ] && pdef="$(rand_port)"
+    fi
+    printf 'SS2022 端口（TCP+UDP）[%s]: ' "$pdef" >&2
+    IFS= read -r ans || ans=""
+    [ -z "$ans" ] && ans="$pdef"
+    case "$ans" in
+      ''|*[!0-9]*) log "请输入数字"; continue ;;
+    esac
+    if [ "$ans" -lt 1 ] || [ "$ans" -gt 65535 ]; then
+      log "端口范围必须是 1-65535"
+      continue
+    fi
+    if [ "$ans" = "$LISTEN_PORT" ]; then
+      log "不能和 SOCKS5/HTTP 端口相同"
+      continue
+    fi
+    if [ "$ans" != "$ss_allow" ] && port_in_use "$ans"; then
+      log "端口 $ans 已被本机占用，请重新输入"
+      continue
+    fi
+    SS_PORT="$ans"
+    break
+  done
+
+  printf '%s\n' \
+    "1) 2022-blake3-aes-128-gcm（推荐）" \
+    "2) 2022-blake3-aes-256-gcm" \
+    "3) 2022-blake3-chacha20-poly1305（ARM / 无 AES-NI）" >&2
+  case "$SS_METHOD" in
+    *aes-128*)  mdef=1 ;;
+    *aes-256*)  mdef=2 ;;
+    *chacha20*) mdef=3 ;;
+    *)          mdef=1 ;;
+  esac
+  while :; do
+    printf '加密方式 [1/2/3，回车=%s]: ' "$mdef" >&2
+    IFS= read -r ans || ans=""
+    [ -z "$ans" ] && ans="$mdef"
+    case "$ans" in
+      1) SS_METHOD="2022-blake3-aes-128-gcm"; break ;;
+      2) SS_METHOD="2022-blake3-aes-256-gcm"; break ;;
+      3) SS_METHOD="2022-blake3-chacha20-poly1305"; break ;;
+      *) log "请输入 1、2 或 3" ;;
+    esac
+  done
+
+  if ! valid_ss_key "$SS_METHOD" "${SS_PASS:-}"; then
+    SS_PASS="$(ss_gen_key "$SS_METHOD")"
+  fi
+  while :; do
+    printf 'SS 密码（base64，回车使用随机值）[%s]: ' "$SS_PASS" >&2
+    IFS= read -r ans || ans=""
+    [ -n "$ans" ] && SS_PASS="$ans"
+    if valid_ss_key "$SS_METHOD" "$SS_PASS"; then
+      break
+    fi
+    log "密码必须是 $(ss_key_bytes "$SS_METHOD") 字节的 base64（例如：openssl rand -base64 $(ss_key_bytes "$SS_METHOD")）"
+  done
+
+  SS_EXTERNAL_PORT="${SS_EXTERNAL_PORT:-$SS_PORT}"
+}
+
+prompt_ss_external() {
+  [ "$SS_ENABLE" = "1" ] || return 0
+  def="${SS_EXTERNAL_PORT:-$SS_PORT}"
+  while :; do
+    printf 'SS2022 对外端口 [%s]: ' "$def" >&2
+    IFS= read -r ans || ans=""
+    [ -z "$ans" ] && ans="$def"
+    case "$ans" in
+      ''|*[!0-9]*) log "请输入数字"; continue ;;
+    esac
+    if [ "$ans" -lt 1 ] || [ "$ans" -gt 65535 ]; then
+      log "端口范围必须是 1-65535"
+      continue
+    fi
+    SS_EXTERNAL_PORT="$ans"
+    return 0
+  done
+}
+
 prompt_external_port() {
   def="$1"
   while :; do
@@ -334,6 +475,7 @@ prompt_external() {
   done
 
   prompt_external_port "${EXTERNAL_PORT:-$LISTEN_PORT}"
+  prompt_ss_external
 }
 
 prompt_allow_ip() {
@@ -365,6 +507,11 @@ PROXY_PASS=$(shq "$PROXY_PASS")
 EXTERNAL_HOST=$(shq "$EXTERNAL_HOST")
 EXTERNAL_PORT=$(shq "$EXTERNAL_PORT")
 ALLOW_IP=$(shq "${ALLOW_IP:-}")
+SS_ENABLE=$(shq "${SS_ENABLE:-0}")
+SS_PORT=$(shq "${SS_PORT:-}")
+SS_METHOD=$(shq "${SS_METHOD:-}")
+SS_PASS=$(shq "${SS_PASS:-}")
+SS_EXTERNAL_PORT=$(shq "${SS_EXTERNAL_PORT:-}")
 EOF
   chmod 600 "$STATE_FILE"
 }
@@ -375,6 +522,11 @@ load_state() {
   ALLOW_IP="${ALLOW_IP:-}"
   EXTERNAL_PORT="${EXTERNAL_PORT:-$LISTEN_PORT}"
   EXTERNAL_HOST="${EXTERNAL_HOST:-}"
+  SS_ENABLE="${SS_ENABLE:-0}"
+  SS_PORT="${SS_PORT:-}"
+  SS_METHOD="${SS_METHOD:-}"
+  SS_PASS="${SS_PASS:-}"
+  SS_EXTERNAL_PORT="${SS_EXTERNAL_PORT:-$SS_PORT}"
 }
 
 is_installed() {
@@ -477,8 +629,19 @@ write_config() {
       printf '          "password": "%s"\n' "$PROXY_PASS"
       printf '        }\n      ]'
     fi
-    printf '\n    }\n'
-    printf '  ],\n'
+    printf '\n    }'
+    if [ "$SS_ENABLE" = "1" ] && [ -n "$SS_PORT" ]; then
+      printf ',\n'
+      printf '    {\n'
+      printf '      "type": "shadowsocks",\n'
+      printf '      "tag": "ss-in",\n'
+      printf '      "listen": "%s",\n' "$listen"
+      printf '      "listen_port": %s,\n' "$SS_PORT"
+      printf '      "method": "%s",\n' "$SS_METHOD"
+      printf '      "password": "%s"\n' "$SS_PASS"
+      printf '    }'
+    fi
+    printf '\n  ],\n'
     printf '  "outbounds": [\n'
     printf '    {\n      "type": "direct",\n      "tag": "direct"\n    }\n'
     printf '  ],\n'
@@ -534,61 +697,99 @@ EOF
   fi
 }
 
+landing_ports() {
+  if [ -n "$LISTEN_PORT" ]; then
+    printf '%s\n' "$LISTEN_PORT"
+  fi
+  if [ "$SS_ENABLE" = "1" ] && [ -n "$SS_PORT" ]; then
+    printf '%s\n' "$SS_PORT"
+  fi
+}
+
 ensure_firewall() {
-  if have_cmd ufw; then
-    if ufw status 2>/dev/null | grep -q 'Status: active'; then
-      if [ -n "${ALLOW_IP:-}" ]; then
-        ufw allow from "$ALLOW_IP" to any port "$LISTEN_PORT" proto tcp >/dev/null 2>&1 || true
-      else
-        ufw allow "${LISTEN_PORT}/tcp" >/dev/null 2>&1 || true
-      fi
-    fi
+  ufw_ok=0
+  if have_cmd ufw && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    ufw_ok=1
+  fi
+  fwd_ok=0
+  if have_cmd firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
+    fwd_ok=1
   fi
 
-  if have_cmd firewall-cmd; then
-    if firewall-cmd --state >/dev/null 2>&1; then
+  for lp in $(landing_ports); do
+    if [ "$ufw_ok" = "1" ]; then
+      if [ -n "${ALLOW_IP:-}" ]; then
+        ufw allow from "$ALLOW_IP" to any port "$lp" proto tcp >/dev/null 2>&1 || true
+        ufw allow from "$ALLOW_IP" to any port "$lp" proto udp >/dev/null 2>&1 || true
+      else
+        ufw allow "${lp}/tcp" >/dev/null 2>&1 || true
+        ufw allow "${lp}/udp" >/dev/null 2>&1 || true
+      fi
+    fi
+
+    if [ "$fwd_ok" = "1" ]; then
       if [ -n "${ALLOW_IP:-}" ]; then
         case "$ALLOW_IP" in
           *:*) family="ipv6" ;;
-          *) family="ipv4" ;;
+          *)   family="ipv4" ;;
         esac
-        firewall-cmd --permanent --add-rich-rule="rule family=$family source address=$ALLOW_IP port port=$LISTEN_PORT protocol=tcp accept" >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-rich-rule="rule family=$family source address=$ALLOW_IP port port=$lp protocol=tcp accept" >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-rich-rule="rule family=$family source address=$ALLOW_IP port port=$lp protocol=udp accept" >/dev/null 2>&1 || true
       else
-        firewall-cmd --permanent --add-port="${LISTEN_PORT}/tcp" >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-port="${lp}/tcp" >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-port="${lp}/udp" >/dev/null 2>&1 || true
       fi
-      firewall-cmd --reload >/dev/null 2>&1 || true
     fi
+  done
+
+  if [ "$fwd_ok" = "1" ]; then
+    firewall-cmd --reload >/dev/null 2>&1 || true
   fi
 }
 
 remove_firewall_rules() {
-  old_port="$1"
-  old_ip="$2"
-  [ -n "$old_port" ] || return 0
+  old_ip="$1"
+  shift
 
-  if have_cmd ufw; then
-    if ufw status 2>/dev/null | grep -q 'Status: active'; then
-      if [ -n "$old_ip" ]; then
-        ufw delete allow from "$old_ip" to any port "$old_port" proto tcp >/dev/null 2>&1 || true
-      else
-        ufw delete allow "${old_port}/tcp" >/dev/null 2>&1 || true
-      fi
-    fi
+  ufw_ok=0
+  if have_cmd ufw && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    ufw_ok=1
+  fi
+  fwd_ok=0
+  if have_cmd firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
+    fwd_ok=1
   fi
 
-  if have_cmd firewall-cmd; then
-    if firewall-cmd --state >/dev/null 2>&1; then
+  for old_port in "$@"; do
+    [ -n "$old_port" ] || continue
+
+    if [ "$ufw_ok" = "1" ]; then
+      if [ -n "$old_ip" ]; then
+        ufw delete allow from "$old_ip" to any port "$old_port" proto tcp >/dev/null 2>&1 || true
+        ufw delete allow from "$old_ip" to any port "$old_port" proto udp >/dev/null 2>&1 || true
+      else
+        ufw delete allow "${old_port}/tcp" >/dev/null 2>&1 || true
+        ufw delete allow "${old_port}/udp" >/dev/null 2>&1 || true
+      fi
+    fi
+
+    if [ "$fwd_ok" = "1" ]; then
       if [ -n "$old_ip" ]; then
         case "$old_ip" in
           *:*) family="ipv6" ;;
-          *) family="ipv4" ;;
+          *)   family="ipv4" ;;
         esac
         firewall-cmd --permanent --remove-rich-rule="rule family=$family source address=$old_ip port port=$old_port protocol=tcp accept" >/dev/null 2>&1 || true
+        firewall-cmd --permanent --remove-rich-rule="rule family=$family source address=$old_ip port port=$old_port protocol=udp accept" >/dev/null 2>&1 || true
       else
         firewall-cmd --permanent --remove-port="${old_port}/tcp" >/dev/null 2>&1 || true
+        firewall-cmd --permanent --remove-port="${old_port}/udp" >/dev/null 2>&1 || true
       fi
-      firewall-cmd --reload >/dev/null 2>&1 || true
     fi
+  done
+
+  if [ "$fwd_ok" = "1" ]; then
+    firewall-cmd --reload >/dev/null 2>&1 || true
   fi
 }
 
@@ -687,7 +888,20 @@ show_conn() {
   printf 'socks5://%s%s\n' "$auth" "$hp"
   printf '\nHTTP（仅 TCP）：\n'
   printf 'http://%s%s\n' "$auth" "$hp"
-  printf '\n把上面的链接粘贴到中转机的 sbox.sh「中转设置」中。\n'
+
+  if [ "$SS_ENABLE" = "1" ] && [ -n "$SS_PORT" ]; then
+    ss_port_out="${SS_EXTERNAL_PORT:-$SS_PORT}"
+    ss_hp="$(fmt_hostport "$EXTERNAL_HOST" "$ss_port_out")"
+    ss_uri="$(ss_b64 "$SS_METHOD:$SS_PASS")"
+    printf '\nSS2022（加密传输，推荐）：\n'
+    printf 'ss://%s@%s#SS2022\n' "$ss_uri" "$ss_hp"
+    printf '  地址  ：%s\n' "$ss_hp"
+    printf '  加密  ：%s\n' "$SS_METHOD"
+    printf '  密码  ：%s\n' "$SS_PASS"
+  fi
+
+  printf '\n把上面的链接粘贴到中转机的 sbox.sh「9) 中转线路管理」中。\n'
+  printf 'SS2022 链接选“SS2022 落地”，socks5/http 链接选对应类型。\n'
   if [ -n "${ALLOW_IP:-}" ]; then
     printf '已限制来源：%s\n' "$ALLOW_IP"
   else
@@ -703,6 +917,7 @@ fresh_install() {
   printf '\n%s\n' "===== 第二步：配置落地代理 =====" >&2
   prompt_port
   prompt_auth
+  prompt_ss
   prompt_external
   prompt_allow_ip
 
@@ -728,6 +943,7 @@ change_port() {
   load_state || true
 
   printf '\n%s\n' "===== 修改代理端口 =====" >&2
+  old_ports="$(landing_ports)"
   old_listen="$LISTEN_PORT"
   old_allow="${ALLOW_IP:-}"
   prompt_port
@@ -739,7 +955,7 @@ change_port() {
   stop_service
   save_state
   write_config
-  remove_firewall_rules "$old_listen" "$old_allow"
+  remove_firewall_rules "$old_allow" $old_ports
   ensure_firewall
 
   log "[INFO] 检查 sing-box 配置..."
@@ -786,8 +1002,32 @@ change_allow_ip() {
   old_allow="${ALLOW_IP:-}"
   prompt_allow_ip
   save_state
-  remove_firewall_rules "$LISTEN_PORT" "$old_allow"
+  remove_firewall_rules "$old_allow" $(landing_ports)
   ensure_firewall
+  show_conn
+}
+
+change_ss() {
+  load_state || true
+
+  printf '\n%s\n' "===== 配置 SS2022 落地 =====" >&2
+  old_ports="$(landing_ports)"
+  old_allow="${ALLOW_IP:-}"
+  prompt_ss "${SS_PORT:-}"
+  prompt_ss_external
+
+  stop_service
+  save_state
+  write_config
+  remove_firewall_rules "$old_allow" $old_ports
+  ensure_firewall
+
+  log "[INFO] 检查 sing-box 配置..."
+  "$SB_BIN" check -c "$CONFIG_FILE"
+
+  log "[INFO] 启动服务..."
+  start_service
+
   show_conn
 }
 
@@ -808,24 +1048,30 @@ menu_loop() {
   load_state || true
 
   while :; do
-    printf '\n%s\n' "===== 落地代理（SOCKS5 / HTTP）管理脚本 ====="
-    printf '当前端口：%s\n' "$LISTEN_PORT"
+    printf '\n%s\n' "===== 落地代理（SOCKS5 / HTTP / SS2022）管理脚本 ====="
+    printf '代理端口：%s\n' "$LISTEN_PORT"
     printf '对外地址：%s\n' "$(fmt_hostport "$EXTERNAL_HOST" "$EXTERNAL_PORT")"
     if [ -n "$PROXY_USER" ]; then
       printf '认证    ：%s\n' "$PROXY_USER"
     else
       printf '认证    ：无\n'
     fi
+    if [ "$SS_ENABLE" = "1" ] && [ -n "$SS_PORT" ]; then
+      printf 'SS2022  ：端口 %s（%s）\n' "$SS_PORT" "$SS_METHOD"
+    else
+      printf 'SS2022  ：未开启\n'
+    fi
     printf '%s\n' "1) 重装"
     printf '%s\n' "2) 查看连接信息"
-    printf '%s\n' "3) 修改代理端口"
+    printf '%s\n' "3) 修改 SOCKS5/HTTP 端口"
     printf '%s\n' "4) 修改用户名 / 密码"
     printf '%s\n' "5) 修改对外地址"
     printf '%s\n' "6) 修改来源限制"
-    printf '%s\n' "7) 重启服务"
-    printf '%s\n' "8) 卸载"
+    printf '%s\n' "7) 配置 SS2022"
+    printf '%s\n' "8) 重启服务"
+    printf '%s\n' "9) 卸载"
     printf '%s\n' "0) 退出"
-    printf '%s' "请选择 [0-8]: " >&2
+    printf '%s' "请选择 [0-9]: " >&2
 
     IFS= read -r choice || choice=""
 
@@ -852,11 +1098,14 @@ menu_loop() {
         change_allow_ip
         ;;
       7)
+        change_ss
+        ;;
+      8)
         log "[INFO] 重启服务..."
         restart_service
         printf '%s\n' "[INFO] 服务已重启"
         ;;
-      8)
+      9)
         log "[INFO] 开始卸载..."
         uninstall_all
         printf '%s\n' "[INFO] 已卸载"
@@ -866,7 +1115,7 @@ menu_loop() {
         exit 0
         ;;
       *)
-        log "请输入 0-8 之间的选项"
+        log "请输入 0-9 之间的选项"
         ;;
     esac
   done
