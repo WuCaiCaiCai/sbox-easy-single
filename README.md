@@ -1,51 +1,20 @@
 # sbox-easy-single
 
-一个 POSIX `sh` 脚本，用来快速搭一台 **sing-box** 节点机：
-
-- **Hysteria2 / TUIC / AnyTLS / Mieru**，可任选单协议或组合
-- 支持 IPv4、IPv6、双栈、NAT 机器
-- 可选**多条中转线路**：本机节点始终直连，每条线路单独端口、单独节点链接
-- 落地机可以用同仓库的 `landing.sh` 一键搭好，支持 **SS2022（加密，推荐）**、SOCKS5、HTTP
+sing-box 一键脚本：节点机跑 Hysteria2 / TUIC / AnyTLS / Mieru，落地机跑 SS2022 / SOCKS5 / HTTP。
 
 > 仅限合法、授权、合规的用途。使用前请阅读文末的[免责声明与合规提示](#免责声明与合规提示)。
 
----
-
-## 安装
-
-节点机（跑协议、拉中转线路）：
+节点机：
 
 ```sh
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/WuCaiCaiCai/sbox-easy-single/main/sbox.sh)"
 ```
 
-落地机（给中转线路当出口）：
+落地机：
 
 ```sh
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/WuCaiCaiCai/sbox-easy-single/main/landing.sh)"
 ```
-
-需要 `systemd` 或 `OpenRC`，支持 `amd64` / `arm64` / `armv7`，普通 VPS 直接跑就行。
-
-落地机的细节见 [`LANDING.md`](./LANDING.md)；两个脚本的菜单都会把该填的参数问完，跟着回车走也能装好。
-
----
-
-## 怎么用
-
-1. **先跑落地机**那条命令，按提示走完，建议开启 SS2022，记下最后输出的 `ss://` 链接。
-2. **再跑节点机**那条命令，选协议、选 IP 栈、配端口，脚本会自动装好 `sing-box` 并启动。
-3. 在节点机菜单里进 `9) 中转线路管理` → `1) 添加中转线路`，把上一步的 `ss://` 链接粘进去，再给这条线路分配端口。
-4. `查看节点` 会列出本机节点和每条中转线路的链接，客户端直接用这些节点的 `hy2://` / `tuic://` / `anytls://` / `mierus://` 链接。
-
-几个要点：
-
-- 本机节点永远直连，中转线路是额外加的，互不影响。
-- SS2022 落地是加密的，跨公网走它；SOCKS5 / HTTP 落地是明文，只建议在内网 / VPN 里用。
-- HTTP 落地只有 TCP，UDP 流量会失败；SS2022 和 SOCKS5 支持 TCP + UDP。
-- 落地链接里带密码，只给中转机自己用，别发给客户端。
-- 云厂商安全组要自己放行对应端口，脚本只能改本机防火墙（ufw / firewalld）。
-- 端口撞了脚本会提示重选，不用手动排查。
 
 ---
 

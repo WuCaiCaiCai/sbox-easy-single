@@ -27,6 +27,7 @@ EXTERNAL_HOST=""
 EXTERNAL_PORT=""
 ALLOW_IP=""
 
+MIXED_ENABLE=1
 SS_ENABLE=0
 SS_PORT=""
 SS_METHOD=""
@@ -300,6 +301,34 @@ prompt_port() {
   done
 }
 
+prompt_mixed() {
+  def="n"
+  [ "$MIXED_ENABLE" = "1" ] && def="y"
+  while :; do
+    printf '是否开启 SOCKS5/HTTP 明文落地？[Y/n，当前=%s]: ' "$def" >&2
+    IFS= read -r ans || ans=""
+    case "$ans" in
+      y|Y|yes|YES) MIXED_ENABLE=1; break ;;
+      n|N|no|NO)   MIXED_ENABLE=0; break ;;
+      '')
+        if [ "$def" = "y" ]; then
+          MIXED_ENABLE=1
+        else
+          MIXED_ENABLE=0
+        fi
+        break
+        ;;
+      *) log "请输入 y 或 n" ;;
+    esac
+  done
+  if [ "$MIXED_ENABLE" != "1" ]; then
+    LISTEN_PORT=""
+    PROXY_USER=""
+    PROXY_PASS=""
+    EXTERNAL_PORT=""
+  fi
+}
+
 prompt_auth() {
   if [ -z "$PROXY_USER" ]; then
     PROXY_USER="u$(openssl rand -hex 3)"
@@ -338,22 +367,40 @@ prompt_ss() {
   ss_allow="${1:-}"
   def="n"
   [ "$SS_ENABLE" = "1" ] && def="y"
-  printf '是否同时开启 SS2022 落地（加密传输，推荐）？[Y/n，当前=%s]: ' "$def" >&2
-  IFS= read -r ans || ans=""
-  case "$ans" in
-    y|Y|yes|YES) SS_ENABLE=1 ;;
-    n|N|no|NO)   SS_ENABLE=0; SS_PORT=""; return 0 ;;
-    '')
-      if [ "$def" = "y" ]; then
-        SS_ENABLE=1
-      else
+  while :; do
+    if [ "$MIXED_ENABLE" != "1" ]; then
+      printf 'SOCKS5/HTTP 已关闭，SS2022 必须开启。是否开启 SS2022 落地？[Y/n，当前=%s]: ' "$def" >&2
+    else
+      printf '是否同时开启 SS2022 落地（加密传输，推荐）？[Y/n，当前=%s]: ' "$def" >&2
+    fi
+    IFS= read -r ans || ans=""
+    case "$ans" in
+      y|Y|yes|YES) SS_ENABLE=1; break ;;
+      n|N|no|NO)
+        if [ "$MIXED_ENABLE" != "1" ]; then
+          log "[ERROR] SOCKS5/HTTP 和 SS2022 至少要保留一种落地"
+          continue
+        fi
         SS_ENABLE=0
         SS_PORT=""
         return 0
-      fi
-      ;;
-    *) SS_ENABLE=1 ;;
-  esac
+        ;;
+      '')
+        if [ "$def" = "y" ]; then
+          SS_ENABLE=1
+        elif [ "$MIXED_ENABLE" != "1" ]; then
+          log "[ERROR] SOCKS5/HTTP 和 SS2022 至少要保留一种落地"
+          continue
+        else
+          SS_ENABLE=0
+          SS_PORT=""
+          return 0
+        fi
+        break
+        ;;
+      *) log "请输入 y 或 n" ;;
+    esac
+  done
 
   while :; do
     pdef="$SS_PORT"
@@ -474,7 +521,9 @@ prompt_external() {
     log "[ERROR] 地址格式不正确（IPv6 直接填地址，不要加方括号）"
   done
 
-  prompt_external_port "${EXTERNAL_PORT:-$LISTEN_PORT}"
+  if [ "$MIXED_ENABLE" = "1" ]; then
+    prompt_external_port "${EXTERNAL_PORT:-$LISTEN_PORT}"
+  fi
   prompt_ss_external
 }
 
@@ -507,6 +556,7 @@ PROXY_PASS=$(shq "$PROXY_PASS")
 EXTERNAL_HOST=$(shq "$EXTERNAL_HOST")
 EXTERNAL_PORT=$(shq "$EXTERNAL_PORT")
 ALLOW_IP=$(shq "${ALLOW_IP:-}")
+MIXED_ENABLE=$(shq "${MIXED_ENABLE:-1}")
 SS_ENABLE=$(shq "${SS_ENABLE:-0}")
 SS_PORT=$(shq "${SS_PORT:-}")
 SS_METHOD=$(shq "${SS_METHOD:-}")
@@ -520,6 +570,7 @@ load_state() {
   [ -f "$STATE_FILE" ] || return 1
   . "$STATE_FILE"
   ALLOW_IP="${ALLOW_IP:-}"
+  MIXED_ENABLE="${MIXED_ENABLE:-1}"
   EXTERNAL_PORT="${EXTERNAL_PORT:-$LISTEN_PORT}"
   EXTERNAL_HOST="${EXTERNAL_HOST:-}"
   SS_ENABLE="${SS_ENABLE:-0}"
@@ -618,20 +669,24 @@ write_config() {
     printf '    "output": "%s"\n' "$LOG_FILE"
     printf '  },\n'
     printf '  "inbounds": [\n'
-    printf '    {\n'
-    printf '      "type": "mixed",\n'
-    printf '      "tag": "mixed-in",\n'
-    printf '      "listen": "%s",\n' "$listen"
-    printf '      "listen_port": %s' "$LISTEN_PORT"
-    if [ -n "$PROXY_USER" ]; then
-      printf ',\n      "users": [\n        {\n'
-      printf '          "username": "%s",\n' "$PROXY_USER"
-      printf '          "password": "%s"\n' "$PROXY_PASS"
-      printf '        }\n      ]'
+    ib_first=1
+    if [ "$MIXED_ENABLE" = "1" ] && [ -n "$LISTEN_PORT" ]; then
+      printf '    {\n'
+      printf '      "type": "mixed",\n'
+      printf '      "tag": "mixed-in",\n'
+      printf '      "listen": "%s",\n' "$listen"
+      printf '      "listen_port": %s' "$LISTEN_PORT"
+      if [ -n "$PROXY_USER" ]; then
+        printf ',\n      "users": [\n        {\n'
+        printf '          "username": "%s",\n' "$PROXY_USER"
+        printf '          "password": "%s"\n' "$PROXY_PASS"
+        printf '        }\n      ]'
+      fi
+      printf '\n    }'
+      ib_first=0
     fi
-    printf '\n    }'
     if [ "$SS_ENABLE" = "1" ] && [ -n "$SS_PORT" ]; then
-      printf ',\n'
+      [ "$ib_first" = "1" ] || printf ',\n'
       printf '    {\n'
       printf '      "type": "shadowsocks",\n'
       printf '      "tag": "ss-in",\n'
@@ -698,7 +753,7 @@ EOF
 }
 
 landing_ports() {
-  if [ -n "$LISTEN_PORT" ]; then
+  if [ "$MIXED_ENABLE" = "1" ] && [ -n "$LISTEN_PORT" ]; then
     printf '%s\n' "$LISTEN_PORT"
   fi
   if [ "$SS_ENABLE" = "1" ] && [ -n "$SS_PORT" ]; then
@@ -869,25 +924,28 @@ restart_service() {
 show_conn() {
   load_state || true
 
-  hp="$(fmt_hostport "$EXTERNAL_HOST" "$EXTERNAL_PORT")"
-  if [ -n "$PROXY_USER" ]; then
-    auth="$PROXY_USER:$PROXY_PASS@"
-  else
-    auth=""
-  fi
-
   printf '\n%s\n' "===== 落地连接信息 ====="
-  printf '监听端口：%s\n' "$LISTEN_PORT"
-  printf '对外地址：%s\n' "$hp"
-  if [ -n "$PROXY_USER" ]; then
-    printf '认证    ：%s / %s\n' "$PROXY_USER" "$PROXY_PASS"
-  else
-    printf '认证    ：无（不推荐）\n'
+
+  if [ "$MIXED_ENABLE" = "1" ] && [ -n "$LISTEN_PORT" ]; then
+    hp="$(fmt_hostport "$EXTERNAL_HOST" "$EXTERNAL_PORT")"
+    if [ -n "$PROXY_USER" ]; then
+      auth="$PROXY_USER:$PROXY_PASS@"
+    else
+      auth=""
+    fi
+
+    printf 'SOCKS5/HTTP 端口：%s\n' "$LISTEN_PORT"
+    printf '对外地址：%s\n' "$hp"
+    if [ -n "$PROXY_USER" ]; then
+      printf '认证    ：%s / %s\n' "$PROXY_USER" "$PROXY_PASS"
+    else
+      printf '认证    ：无（不推荐）\n'
+    fi
+    printf '\nSOCKS5（支持 TCP + UDP）：\n'
+    printf 'socks5://%s%s\n' "$auth" "$hp"
+    printf '\nHTTP（仅 TCP）：\n'
+    printf 'http://%s%s\n' "$auth" "$hp"
   fi
-  printf '\nSOCKS5（支持 TCP，UDP 取决于落地防火墙）：\n'
-  printf 'socks5://%s%s\n' "$auth" "$hp"
-  printf '\nHTTP（仅 TCP）：\n'
-  printf 'http://%s%s\n' "$auth" "$hp"
 
   if [ "$SS_ENABLE" = "1" ] && [ -n "$SS_PORT" ]; then
     ss_port_out="${SS_EXTERNAL_PORT:-$SS_PORT}"
@@ -910,13 +968,17 @@ show_conn() {
   printf '\n'
 }
 
+
 fresh_install() {
   ensure_deps
   detect_env
 
   printf '\n%s\n' "===== 第二步：配置落地代理 =====" >&2
-  prompt_port
-  prompt_auth
+  prompt_mixed
+  if [ "$MIXED_ENABLE" = "1" ]; then
+    prompt_port
+    prompt_auth
+  fi
   prompt_ss
   prompt_external
   prompt_allow_ip
@@ -942,15 +1004,22 @@ fresh_install() {
 change_port() {
   load_state || true
 
-  printf '\n%s\n' "===== 修改代理端口 =====" >&2
+  printf '\n%s\n' "===== 配置 SOCKS5/HTTP 落地 =====" >&2
   old_ports="$(landing_ports)"
   old_listen="$LISTEN_PORT"
   old_allow="${ALLOW_IP:-}"
-  prompt_port
-  if [ -z "${EXTERNAL_PORT:-}" ] || [ "$EXTERNAL_PORT" = "$old_listen" ]; then
-    EXTERNAL_PORT="$LISTEN_PORT"
+  prompt_mixed
+  if [ "$MIXED_ENABLE" != "1" ] && [ "$SS_ENABLE" != "1" ]; then
+    log "[ERROR] SS2022 未开启，不能同时关闭 SOCKS5/HTTP；请先在菜单 7 开启 SS2022"
+    return 0
   fi
-  prompt_external_port "$EXTERNAL_PORT"
+  if [ "$MIXED_ENABLE" = "1" ]; then
+    prompt_port
+    if [ -z "${EXTERNAL_PORT:-}" ] || [ "$EXTERNAL_PORT" = "$old_listen" ]; then
+      EXTERNAL_PORT="$LISTEN_PORT"
+    fi
+    prompt_external_port "$EXTERNAL_PORT"
+  fi
 
   stop_service
   save_state
@@ -969,6 +1038,11 @@ change_port() {
 
 change_auth() {
   load_state || true
+
+  if [ "$MIXED_ENABLE" != "1" ]; then
+    log "[ERROR] SOCKS5/HTTP 未开启，请先在菜单 3 开启"
+    return 0
+  fi
 
   printf '\n%s\n' "===== 修改用户名 / 密码 =====" >&2
   prompt_auth
@@ -1049,12 +1123,17 @@ menu_loop() {
 
   while :; do
     printf '\n%s\n' "===== 落地代理（SOCKS5 / HTTP / SS2022）管理脚本 ====="
-    printf '代理端口：%s\n' "$LISTEN_PORT"
-    printf '对外地址：%s\n' "$(fmt_hostport "$EXTERNAL_HOST" "$EXTERNAL_PORT")"
-    if [ -n "$PROXY_USER" ]; then
-      printf '认证    ：%s\n' "$PROXY_USER"
+    if [ "$MIXED_ENABLE" = "1" ] && [ -n "$LISTEN_PORT" ]; then
+      printf 'SOCKS5/HTTP：端口 %s\n' "$LISTEN_PORT"
+      printf '对外地址：%s\n' "$(fmt_hostport "$EXTERNAL_HOST" "$EXTERNAL_PORT")"
+      if [ -n "$PROXY_USER" ]; then
+        printf '认证    ：%s\n' "$PROXY_USER"
+      else
+        printf '认证    ：无\n'
+      fi
     else
-      printf '认证    ：无\n'
+      printf 'SOCKS5/HTTP：未开启（仅 SS2022）\n'
+      printf '对外地址：%s\n' "${EXTERNAL_HOST:-未设置}"
     fi
     if [ "$SS_ENABLE" = "1" ] && [ -n "$SS_PORT" ]; then
       printf 'SS2022  ：端口 %s（%s）\n' "$SS_PORT" "$SS_METHOD"
@@ -1063,11 +1142,11 @@ menu_loop() {
     fi
     printf '%s\n' "1) 重装"
     printf '%s\n' "2) 查看连接信息"
-    printf '%s\n' "3) 修改 SOCKS5/HTTP 端口"
+    printf '%s\n' "3) 配置 SOCKS5/HTTP（开关 / 端口）"
     printf '%s\n' "4) 修改用户名 / 密码"
     printf '%s\n' "5) 修改对外地址"
     printf '%s\n' "6) 修改来源限制"
-    printf '%s\n' "7) 配置 SS2022"
+    printf '%s\n' "7) 配置 SS2022（开关 / 端口 / 密钥）"
     printf '%s\n' "8) 重启服务"
     printf '%s\n' "9) 卸载"
     printf '%s\n' "0) 退出"
