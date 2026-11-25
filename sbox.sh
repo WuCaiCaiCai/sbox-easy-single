@@ -58,6 +58,7 @@ ENABLE_HY2=0
 ENABLE_TUIC=0
 ENABLE_ANYTLS=0
 ENABLE_MIERU=0
+MIERU_TRANSPORT="TCP"
 IP_MODE=""
 
 AUTH_PASS=""
@@ -554,9 +555,9 @@ show_protocol_status() {
   fi
   if [ "$ENABLE_MIERU" = "1" ]; then
     if [ -n "$label" ]; then
-      label="$label / Mieru"
+      label="$label / Mieru($(mieru_proto_name))"
     else
-      label="Mieru"
+      label="Mieru($(mieru_proto_name))"
     fi
   fi
   printf '%s' "${label:-无}"
@@ -568,7 +569,7 @@ prompt_protocols() {
   printf '%s\n' "1) Hysteria2（UDP，sing-box）" >&2
   printf '%s\n' "2) TUIC（UDP，sing-box）" >&2
   printf '%s\n' "3) AnyTLS（TCP，sing-box）" >&2
-  printf '%s\n' "4) Mieru（TCP+UDP，需使用 mbox 构建）" >&2
+  printf '%s\n' "4) Mieru（TCP 或 UDP 二选一，需使用 mbox 构建）" >&2
   printf '%s\n' "5) 全部安装（Hysteria2 + TUIC + AnyTLS + Mieru）" >&2
   printf '%s\n' "多选示例：输入 1,4 表示只安装 Hysteria2 和 Mieru" >&2
   printf '%s\n' "0) 取消" >&2
@@ -588,10 +589,53 @@ prompt_protocols() {
 
     if apply_protocol_choice "$ans"; then
       log "[INFO] 已选择协议：$(show_protocol_status)"
+      prompt_mieru_transport || return 1
       return 0
     fi
     log "[ERROR] 无效选择，请输入 1-5 或逗号分隔的组合（如 1,4）"
   done
+}
+
+mieru_proto_name() {
+  case "$MIERU_TRANSPORT" in
+    UDP) printf 'UDP' ;;
+    *)   printf 'TCP' ;;
+  esac
+}
+
+mieru_proto_port_kind() {
+  case "$MIERU_TRANSPORT" in
+    UDP) printf 'udp' ;;
+    *)   printf 'tcp' ;;
+  esac
+}
+
+prompt_mieru_transport() {
+  [ "$ENABLE_MIERU" = "1" ] || return 0
+
+  printf '\n%s\n' "===== Mieru 传输协议（每条链接只能一种）=====" >&2
+  printf '当前选择：%s\n' "$(mieru_proto_name)" >&2
+  printf '%s\n' "1) TCP：兼容性最好，绝大多数网络都能通，被限速/封锁概率低；速度略逊，高延迟线路抖动更明显" >&2
+  printf '%s\n' "2) UDP：延迟更低、抗丢包（QUIC 风格），适合游戏 / 语音视频 / HTTP3；部分网络会限速甚至屏蔽 UDP" >&2
+  printf '%s\n' "建议：不确定选 TCP；确认运营商/云厂商不封 UDP 且在意延迟再选 UDP" >&2
+
+  while :; do
+    printf '请选择 [1/2]: ' >&2
+    read_or_exit ans
+    case "$ans" in
+      '') break ;;
+      1) MIERU_TRANSPORT="TCP" ;;
+      2) MIERU_TRANSPORT="UDP" ;;
+      0) return 1 ;;
+      *)
+        log "[ERROR] 请输入 1 或 2"
+        continue
+        ;;
+    esac
+    break
+  done
+  log "[INFO] Mieru 传输协议：$MIERU_TRANSPORT"
+  return 0
 }
 
 ip_mode_label() {
@@ -679,7 +723,7 @@ mark_all_line_ports() {
     line_p="$(line_get "$line_i" ANYTLS_PORT)"
     [ -n "$line_p" ] && proto_port_mark tcp "$line_p"
     line_p="$(line_get "$line_i" MIERU_PORT)"
-    [ -n "$line_p" ] && proto_port_mark both "$line_p"
+    [ -n "$line_p" ] && proto_port_mark "$(mieru_proto_port_kind)" "$line_p"
     line_i=$((line_i + 1))
   done
 }
@@ -715,7 +759,7 @@ prompt_all_ports() {
     ANYTLS_LISTEN_PORT="$(prompt_port '请输入 ANYTLS 端口 (TCP) [回车随机]' tcp)"
   fi
   if [ "$ENABLE_MIERU" = "1" ]; then
-    MIERU_LISTEN_PORT="$(prompt_port '请输入 Mieru 端口 (TCP+UDP) [回车随机]' both 1025)"
+    MIERU_LISTEN_PORT="$(prompt_port "请输入 Mieru 端口 ($(mieru_proto_name)) [回车随机]" "$(mieru_proto_port_kind)" 1025)"
   fi
 }
 
@@ -735,7 +779,12 @@ prompt_missing_ports() {
     proto_port_mark tcp "$ANYTLS_LISTEN_PORT"
   fi
   if [ "$ENABLE_MIERU" = "1" ] && [ -n "$MIERU_LISTEN_PORT" ]; then
-    proto_port_mark both "$MIERU_LISTEN_PORT"
+    if proto_port_selected "$(mieru_proto_port_kind)" "$MIERU_LISTEN_PORT"; then
+      log "[WARN] Mieru 端口 $MIERU_LISTEN_PORT 与已启用的 $(mieru_proto_name) 协议端口冲突，请重新选择"
+      MIERU_LISTEN_PORT=""
+    else
+      proto_port_mark "$(mieru_proto_port_kind)" "$MIERU_LISTEN_PORT"
+    fi
   fi
 
   if [ "$ENABLE_HY2" = "1" ] && [ -z "$HY2_LISTEN_PORT" ]; then
@@ -748,7 +797,7 @@ prompt_missing_ports() {
     ANYTLS_LISTEN_PORT="$(prompt_port '请输入 ANYTLS 端口 (TCP) [回车随机]' tcp)"
   fi
   if [ "$ENABLE_MIERU" = "1" ] && [ -z "$MIERU_LISTEN_PORT" ]; then
-    MIERU_LISTEN_PORT="$(prompt_port '请输入 Mieru 端口 (TCP+UDP) [回车随机]' both 1025)"
+    MIERU_LISTEN_PORT="$(prompt_port "请输入 Mieru 端口 ($(mieru_proto_name)) [回车随机]" "$(mieru_proto_port_kind)" 1025)"
   fi
 }
 
@@ -1076,7 +1125,12 @@ prompt_line_ports() {
     proto_port_mark tcp "$ANYTLS_LISTEN_PORT"
   fi
   if [ "$ENABLE_MIERU" = "1" ] && [ -n "$MIERU_LISTEN_PORT" ]; then
-    proto_port_mark both "$MIERU_LISTEN_PORT"
+    if proto_port_selected "$(mieru_proto_port_kind)" "$MIERU_LISTEN_PORT"; then
+      log "[WARN] Mieru 端口 $MIERU_LISTEN_PORT 与已启用的 $(mieru_proto_name) 协议端口冲突，请重新选择"
+      MIERU_LISTEN_PORT=""
+    else
+      proto_port_mark "$(mieru_proto_port_kind)" "$MIERU_LISTEN_PORT"
+    fi
   fi
 
   line_j=1
@@ -1089,7 +1143,7 @@ prompt_line_ports() {
       line_p="$(line_get "$line_j" ANYTLS_PORT)"
       [ -n "$line_p" ] && proto_port_mark tcp "$line_p"
       line_p="$(line_get "$line_j" MIERU_PORT)"
-      [ -n "$line_p" ] && proto_port_mark both "$line_p"
+      [ -n "$line_p" ] && proto_port_mark "$(mieru_proto_port_kind)" "$line_p"
     fi
     line_j=$((line_j + 1))
   done
@@ -1110,7 +1164,7 @@ prompt_line_ports() {
     RELAY_ANYTLS_PORT=""
   fi
   if [ "$ENABLE_MIERU" = "1" ]; then
-    RELAY_MIERU_PORT="$(prompt_port "请输入 $line_label_name 的 Mieru 端口 (TCP+UDP) [回车随机]" both 1025 "$RELAY_MIERU_PORT")"
+    RELAY_MIERU_PORT="$(prompt_port "请输入 $line_label_name 的 Mieru 端口 ($(mieru_proto_name)) [回车随机]" "$(mieru_proto_port_kind)" 1025 "$RELAY_MIERU_PORT")"
   else
     RELAY_MIERU_PORT=""
   fi
@@ -1282,7 +1336,12 @@ prompt_missing_line_ports() {
     proto_port_mark tcp "$ANYTLS_LISTEN_PORT"
   fi
   if [ "$ENABLE_MIERU" = "1" ] && [ -n "$MIERU_LISTEN_PORT" ]; then
-    proto_port_mark both "$MIERU_LISTEN_PORT"
+    if proto_port_selected "$(mieru_proto_port_kind)" "$MIERU_LISTEN_PORT"; then
+      log "[WARN] Mieru 端口 $MIERU_LISTEN_PORT 与已启用的 $(mieru_proto_name) 协议端口冲突，请重新选择"
+      MIERU_LISTEN_PORT=""
+    else
+      proto_port_mark "$(mieru_proto_port_kind)" "$MIERU_LISTEN_PORT"
+    fi
   fi
 
   line_j=1
@@ -1294,7 +1353,14 @@ prompt_missing_line_ports() {
     line_p="$(line_get "$line_j" ANYTLS_PORT)"
     [ -n "$line_p" ] && proto_port_mark tcp "$line_p"
     line_p="$(line_get "$line_j" MIERU_PORT)"
-    [ -n "$line_p" ] && proto_port_mark both "$line_p"
+    if [ -n "$line_p" ]; then
+      if proto_port_selected "$(mieru_proto_port_kind)" "$line_p"; then
+        log "[WARN] 线路 $(line_name "$line_j") 的 Mieru 端口 $line_p 与已启用协议冲突，请重新选择"
+        line_set "$line_j" MIERU_PORT ""
+      else
+        proto_port_mark "$(mieru_proto_port_kind)" "$line_p"
+      fi
+    fi
     line_j=$((line_j + 1))
   done
 
@@ -1315,7 +1381,7 @@ prompt_missing_line_ports() {
       line_set "$line_i" ANYTLS_PORT "$line_p"
     fi
     if [ "$ENABLE_MIERU" = "1" ] && [ -z "$(line_get "$line_i" MIERU_PORT)" ]; then
-      line_p="$(prompt_port "请输入 $line_label_name 的 Mieru 端口 (TCP+UDP) [回车随机]" both 1025)"
+      line_p="$(prompt_port "请输入 $line_label_name 的 Mieru 端口 ($(mieru_proto_name)) [回车随机]" "$(mieru_proto_port_kind)" 1025)"
       line_set "$line_i" MIERU_PORT "$line_p"
     fi
 
@@ -1523,6 +1589,7 @@ AUTH_PASS=$(shq "$AUTH_PASS")
 UUID=$(shq "$UUID")
 MIERU_USER=$(shq "$MIERU_USER")
 MIERU_PASS=$(shq "$MIERU_PASS")
+MIERU_TRANSPORT=$(shq "$MIERU_TRANSPORT")
 NODE_PREFIX=$(shq "${NODE_PREFIX:-}")
 SB_FLAVOR=$(shq "${SB_FLAVOR:-}")
 LINE_COUNT=$(shq "$LINE_COUNT")
@@ -1554,6 +1621,12 @@ load_state() {
   ENABLE_TUIC="${ENABLE_TUIC:-1}"
   ENABLE_ANYTLS="${ENABLE_ANYTLS:-1}"
   ENABLE_MIERU="${ENABLE_MIERU:-0}"
+  MIERU_TRANSPORT="${MIERU_TRANSPORT:-TCP}"
+  case "$MIERU_TRANSPORT" in
+    TCP|tcp) MIERU_TRANSPORT="TCP" ;;
+    UDP|udp) MIERU_TRANSPORT="UDP" ;;
+    *)       MIERU_TRANSPORT="TCP" ;;
+  esac
   SB_FLAVOR="${SB_FLAVOR:-}"
   NODE_PREFIX="${NODE_PREFIX:-}"
   LINE_COUNT="${LINE_COUNT:-0}"
@@ -1746,6 +1819,25 @@ append_inbound_mieru() {
   ib_listen="$1"
   ib_port="$2"
   ib_tag="$3"
+  if [ "${MIERU_TRANSPORT:-TCP}" = "UDP" ]; then
+    cat >> "$ib_file" <<EOF
+    {
+      "type": "mieru",
+      "tag": "${ib_tag}-udp",
+      "listen": "$ib_listen",
+      "listen_port": $ib_port,
+      "transport": "UDP",
+      "users": [
+        {
+          "name": "$MIERU_USER",
+          "password": "$MIERU_PASS"
+        }
+      ]
+    },
+EOF
+    return 0
+  fi
+
   cat >> "$ib_file" <<EOF
     {
       "type": "mieru",
@@ -1761,19 +1853,6 @@ append_inbound_mieru() {
       ],
       "user_hint_is_mandatory": false,
       "tcp_idle_timeout": 1800
-    },
-    {
-      "type": "mieru",
-      "tag": "${ib_tag}-udp",
-      "listen": "$ib_listen",
-      "listen_port": $ib_port,
-      "transport": "UDP",
-      "users": [
-        {
-          "name": "$MIERU_USER",
-          "password": "$MIERU_PASS"
-        }
-      ]
     },
 EOF
 }
@@ -1900,7 +1979,13 @@ write_config() {
         if [ "$ENABLE_HY2" = "1" ]; then route_tags="$route_tags \"line${line_i}-hy2\","; fi
         if [ "$ENABLE_TUIC" = "1" ]; then route_tags="$route_tags \"line${line_i}-tuic\","; fi
         if [ "$ENABLE_ANYTLS" = "1" ]; then route_tags="$route_tags \"line${line_i}-anytls\","; fi
-        if [ "$ENABLE_MIERU" = "1" ]; then route_tags="$route_tags \"line${line_i}-mieru-tcp\", \"line${line_i}-mieru-udp\","; fi
+        if [ "$ENABLE_MIERU" = "1" ]; then
+          if [ "${MIERU_TRANSPORT:-TCP}" = "UDP" ]; then
+            route_tags="$route_tags \"line${line_i}-mieru-udp\","
+          else
+            route_tags="$route_tags \"line${line_i}-mieru-tcp\","
+          fi
+        fi
         route_tags="${route_tags%,}"
         printf '      {\n'
         printf '        "inbound": [%s],\n' "$route_tags"
@@ -1984,8 +2069,7 @@ ensure_firewall() {
         ufw allow "${ANYTLS_LISTEN_PORT}/tcp" >/dev/null 2>&1 || true
       fi
       if [ "$ENABLE_MIERU" = "1" ]; then
-        ufw allow "${MIERU_LISTEN_PORT}/tcp" >/dev/null 2>&1 || true
-        ufw allow "${MIERU_LISTEN_PORT}/udp" >/dev/null 2>&1 || true
+        ufw allow "${MIERU_LISTEN_PORT}/$(mieru_proto_port_kind)" >/dev/null 2>&1 || true
       fi
 
       line_i=1
@@ -2005,8 +2089,7 @@ ensure_firewall() {
         if [ "$ENABLE_MIERU" = "1" ]; then
           line_p="$(line_get "$line_i" MIERU_PORT)"
           if [ -n "$line_p" ]; then
-            ufw allow "${line_p}/tcp" >/dev/null 2>&1 || true
-            ufw allow "${line_p}/udp" >/dev/null 2>&1 || true
+            ufw allow "${line_p}/$(mieru_proto_port_kind)" >/dev/null 2>&1 || true
           fi
         fi
         line_i=$((line_i + 1))
@@ -2026,8 +2109,7 @@ ensure_firewall() {
         firewall-cmd --permanent --add-port="${ANYTLS_LISTEN_PORT}/tcp" >/dev/null 2>&1 || true
       fi
       if [ "$ENABLE_MIERU" = "1" ]; then
-        firewall-cmd --permanent --add-port="${MIERU_LISTEN_PORT}/tcp" >/dev/null 2>&1 || true
-        firewall-cmd --permanent --add-port="${MIERU_LISTEN_PORT}/udp" >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-port="${MIERU_LISTEN_PORT}/$(mieru_proto_port_kind)" >/dev/null 2>&1 || true
       fi
 
       line_i=1
@@ -2047,8 +2129,7 @@ ensure_firewall() {
         if [ "$ENABLE_MIERU" = "1" ]; then
           line_p="$(line_get "$line_i" MIERU_PORT)"
           if [ -n "$line_p" ]; then
-            firewall-cmd --permanent --add-port="${line_p}/tcp" >/dev/null 2>&1 || true
-            firewall-cmd --permanent --add-port="${line_p}/udp" >/dev/null 2>&1 || true
+            firewall-cmd --permanent --add-port="${line_p}/$(mieru_proto_port_kind)" >/dev/null 2>&1 || true
           fi
         fi
         line_i=$((line_i + 1))
@@ -2167,7 +2248,10 @@ emit_mieru() {
   host="$1"
   port="$2"
   name="$3"
-  printf '%s\n' "mierus://${MIERU_USER}:${MIERU_PASS}@${host}?port=${port}&protocol=TCP&port=${port}&protocol=UDP&profile=default#$name"
+  hp="$(fmt_hostport "$host" "$port")"
+  # SublinkPro / mihomo 只接受单协议链接，按用户选择的传输协议输出一条
+  proto="$(mieru_proto_name)"
+  printf '%s\n' "mierus://${MIERU_USER}:${MIERU_PASS}@${hp}?port=${port}&protocol=$proto&profile=default#${name}_$proto"
 }
 
 show_node_set() {
@@ -2237,13 +2321,21 @@ show_nodes() {
   fi
 
   if [ "$ENABLE_MIERU" = "1" ]; then
-    printf '\nMieru 客户端导入：mieru import config "<上面的 mierus 链接>"\n'
-    printf 'mihomo/clash.meta（本机）：type: mieru, port: %s, transport: TCP, udp: true\n' "$MIERU_LISTEN_PORT"
+    printf '\nMieru 传输协议：%s（每条链接只绑定这一种）\n' "$(mieru_proto_name)"
+    printf '  官方客户端：mieru import config "<上面的 mierus 链接>"\n'
+    printf '  mihomo/clash.meta（本机）：type: mieru, port: %s, transport: %s, udp: true\n' "$MIERU_LISTEN_PORT" "$(mieru_proto_name)"
     line_i=1
     while [ "$line_i" -le "$LINE_COUNT" ]; do
-      printf 'mihomo/clash.meta（%s）：type: mieru, port: %s, transport: TCP, udp: true\n' "$(line_name "$line_i")" "$(line_get "$line_i" MIERU_PORT)"
+      printf '  mihomo/clash.meta（%s）：type: mieru, port: %s, transport: %s, udp: true\n' "$(line_name "$line_i")" "$(line_get "$line_i" MIERU_PORT)" "$(mieru_proto_name)"
       line_i=$((line_i + 1))
     done
+    if [ "$MIERU_TRANSPORT" = "UDP" ]; then
+      printf '  UDP 延迟低、抗丢包；若运营商 QoS 限速 UDP，可在菜单 6 换回 TCP。\n'
+      printf '  注意：云安全组 / 外部防火墙也要放行 UDP 端口。\n'
+    else
+      printf '  TCP 兼容性最好；想要更低延迟可在菜单 6 换 UDP（需客户端同步改协议）。\n'
+      printf '  注意：云安全组 / 外部防火墙也要放行 TCP 端口。\n'
+    fi
   fi
 
   if [ "$LINE_COUNT" -gt 0 ]; then
